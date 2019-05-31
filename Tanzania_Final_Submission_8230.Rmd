@@ -1,0 +1,1235 @@
+---
+title: "2nd Assignment - Machine Learning II - Tanzania"
+author: "Anotonia, Andrew, Clara, Pravat"
+date: "26 February 2019"
+output:
+  html_document:
+    fig_caption: yes
+    fig_width: 6
+    fig_height: 4
+    toc: yes
+    toc_float: yes
+    toc_depth: 2
+---
+
+# User details
+
+**User Name**: pasayat.pravat
+
+**Best Score**: 0.8230
+
+**Ranking**: 198 (as of 09-03-2019)
+
+# Importing Libraries
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+library(data.table)
+library(plyr)
+library(ggplot2)
+library(dplyr)
+library(png) 
+library(knitr) 
+library(moments) 
+library(e1071) 
+library(glmnet) 
+library(caret) 
+library(lubridate)
+library(VIM)
+library(ggmap)
+library(xgboost)
+library(mlr)
+library(adabag)
+library(party)
+library(maps)
+library(ggthemes)
+library(DT)
+library(leaflet)
+library(missForest)
+library(RColorBrewer)
+library(DiagrammeR)
+library(ROCR)
+library(pROC)
+library(plotROC)
+library(nnet)
+library(caretEnsemble)
+library(mlbench)
+```
+
+# Introduction
+
+In this second assignment we are going to help the Tanzanian Ministry of Water in providing water to their people, quite an ambitious task. In particular we are going to participate in the Pump it Up: Data Mining the Water Table challenge <https://www.drivendata.org/competitions/7/pump-it-up-data-mining-the-water-table/>. Our task is to predict which water pumps are going to continue working, which are going to need repairs and which are going to fail. 
+
+For this assignment, we are presented a more realistic machine learning scenario: we have a task, a description of what is expected, a dataset to work with and a brief description of the data. We have to make sense of the problem and the data, and use your ML toolbox to solve the problem.
+
+**Details:**
+
+1. This is a multi-class classification task. 
+
+2. We can apply any of the algorithms we have explained in class to address the task: 
+Regression, Decision Trees, Naive Bayes, KNN
+
+**Recommendations:**
+
+1.  We need to understand the problem description. It contains valuable information on the dataset and the task.
+
+2. Feature Engineering is important for this dataset. It includes categorical and numerical values, so, we should properly deal with each of them: 
+remove outliers, remove useless features, look for NAs and missing data and impute them, create new features if you consider them useful. 
+
+3. Decision Trees are expected to offer the best results (Bagging, RF, XGBoost).
+
+4. As happens with Kaggle, you can find useful kernels and sample code about this dataset. Take a look to the Discussion Forum where you can find useful tips and information on the dataset. 
+
+## What is my goal?
+
+- Our goal is to predict the operating condition of a waterpoint for each record in the dataset. Therefore a multi-class classification.
+- We have to clean the dataset to allow its further processing.
+- We have to use the feature engineering techniques explained in class to transform the dataset.
+- We have to build a ML model by looking at different possibilities. 
+- We have to properly apply the evaluation methods and ideas (train, validation, test splitting; cross-validation, chose the proper metric, ..) to understand the real performance of the proposed models, making sure that they will generalize to unseen data (test set).
+
+# Useful Functions
+
+We will declare all the functions that will used again and again within our ML model design.
+
+1. Three functions "reduce_num_levels", "reduce_size_levels" and "myreduce_levels" that help us to bin categories.
+
+2. Function "convertToLowerCase" that helps us to convert all characters to lowercase.
+
+3. Function "findMissingValueStatistics" that helps us to calculate the missing value statistics.
+
+4. Function "find_numeric_features" that helps us to find out the features that are numeric.
+
+5. Function "standardize_feature" that helps us in standardizing the numeric/integer features based on mean and standard deviation.
+
+6. Function "splitdf" that helps us to split a dataset into two datasets based on a specified propertion.
+
+7. Function "chooseBestModel" that helps us to find the best result (using majority voting) from stacked models.
+
+```{r Useful Functions}
+# Below Three functions reduce the number of levels of a categorical variable by grouping the smaller levels into "other"
+
+reduce_num_levels = function(x, nlevels){
+  levels = table(x)
+  if(n_distinct(x) > (nlevels + 1)){
+    small_levels = names(sort(levels, decreasing = TRUE)[- seq(nlevels)])
+    x[x %in% small_levels] = "other"
+  }
+  return (x)
+}
+
+reduce_size_levels = function(x, min_size){
+  levels = table(x)
+  if(min(levels) < min_size){
+    small_levels = names(levels[levels < min_size])
+    x[x %in% small_levels] = "other"
+  }
+  return (x)
+}
+
+myreduce_levels = function(x, min_size, nlevels){
+  if(!"other" %in% levels(x)){
+    x <- factor(x, levels=c(levels(x), "other"))
+  }
+  return (reduce_num_levels(reduce_size_levels(x, min_size), nlevels))
+}
+
+# Below function converts all characters (present in various features) to lowercase
+convertToLowerCase = function(inputDataset){
+  for(columnName in colnames(inputDataset)){
+    if(columnName != "status_group" && class(inputDataset[[columnName]]) == "factor"){
+      inputDataset[[columnName]] <- as.factor(tolower(as.character(inputDataset[[columnName]])))
+    }
+  }
+  return(inputDataset)
+}
+
+# Below function tell us which features contain null values, their count and percentage.
+findMissingValueStatistics <- function(inputDataset){
+  # Find columns with milling values
+  na.cols <- which(colSums(is.na(dataset)) > 0)
+  
+  # Number of missing values in descending order
+  print('Missing values per column')
+  print(sort(colSums(sapply(dataset[na.cols], is.na)), decreasing = TRUE))
+  
+  # Missing values in percentages
+  print('Missing values percentage per column')
+  print(sort(sapply(dataset[na.cols], function(x){100*sum(is.na(x))/length(x)}), decreasing = TRUE));
+}
+
+# This function finds all numeric/integer features of a dataset
+find_numeric_features <- function(myDataset){
+  column_types <- sapply(names(myDataset), function(x) {class(myDataset[[x]])})
+  numeric_columns <- names(column_types[column_types != "factor"])
+  return(numeric_columns)
+}
+
+# This function standardizes all the numeric features
+standardize_feature <- function(myDataset){
+  # Fetch the numeric/integer columns
+  numeric_columns <- find_numeric_features(myDataset)
+  
+  for(columnName in numeric_columns){
+    columnMean <- mean(myDataset[[columnName]])
+    columnSD <- sd(myDataset[[columnName]])
+    myDataset[[columnName]] <- (myDataset[[columnName]] - columnMean)/columnSD
+  }
+  return(myDataset)
+}
+
+# This function splits the dataset into training and validation sets
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  index <- 1:nrow(dataframe)
+  trainindex <- sample(index, trunc(length(index)/1.5))
+  trainset <- dataframe[trainindex, ]
+  testset <- dataframe[-trainindex, ]
+  list(trainset=trainset,testset=testset)
+}
+
+# Gives us the result of the Target variable after stacking the models
+chooseBestModel <- function(final_pred_xgboost, final_pred_rf, final_pred_knn) {
+  if ((final_pred_xgboost == final_pred_rf) | (final_pred_xgboost == final_pred_knn)){
+    return (final_pred_xgboost)
+  }
+  else if (final_pred_rf == final_pred_knn){
+    return(final_pred_rf)
+  }
+  else { 
+    return(final_pred_xgboost)
+  }
+}
+```
+
+# Data Reading and preparation
+
+The dataset is offered in three separated files,
+
+1. One for the training values
+
+2. One for the training lables i.e. target variable of the training values
+
+3. Last one for the test values, for which we have to find out the labels.
+
+While going through the data files, we observed that there are lot of empty value. In addition to that there are values such as "unknown", "Unknown" and "Not Known". We identified and smartly assumed that these are Null values. So, while reading the file, we mark these values as NA.
+
+```{r Load Data}
+# Load the TRAIN dataset values
+original_training_values = read.csv(file = file.path("Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_values.csv"), na.strings = c(NA,""," ","unknown","Unknown", "Not Known"))
+
+# Load the TRAIN dataset labels
+original_training_lables= read.csv(file = file.path("Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_labels.csv"), na.strings = c(NA,""," ","unknown","Unknown", "Not Known"))
+
+# Load the TEST dataset values
+original_test_data = read.csv(file = file.path("Pump_it_Up_Data_Mining_the_Water_Table_-_Test_set_values.csv"), na.strings = c(NA,""," ","unknown","Unknown", "Not Known"))
+```
+
+As the training dataset values and lebels are present in two different files, we join them with proper key, so that each training data row gets its correct label. Then, to avoid applying the Feature Engineering process two times (once for training and once for test), you can just join both datasets (using the `rbind` function), apply your FE and then split the datasets again. However, if we try to do join the two dataframes as they are, we will get an error because they do not have the same columns: `test_data` does not have a column `status_group`. Therefore, we have to create this column in the test set and then we join the data
+
+```{r Joinning datasets}
+# Check if we have matching ids in original_training_values and original_training_lables dataset
+all.equal(original_training_values$id, original_training_lables$id)
+
+# Join the TRAIN datasets values with labels
+original_training_data <- join(original_training_values, original_training_lables, type = "inner")
+
+# Create the column "status_group" in TEST dataset and assign the value to "TBD" i.e. to be done
+original_test_data$status_group <- "TBD" 
+
+# Create the column "dataType" in both TRAIN and TEST set and assign the value 'train' & 'test'. This will help us to split the dataset from the dataType, not by position.
+original_training_data$dataType <- "train"
+original_test_data$dataType <- "test"
+
+# Merge the TRAIN and TEST dataset
+dataset <- rbind(original_training_data, original_test_data)
+```
+
+# EDA - Exploratory Data Analysis
+
+Let's now visualize the dataset to see where to begin with.
+
+```{r Dataset Visualization}
+# Check the summary of all features
+summary(dataset)
+
+# Visualize the data
+datatable(head(dataset), options = list(scrollX = TRUE, pageLength = 5), class = 'cell-border stripe',rownames = FALSE)
+```
+
+We can see some problems just by taking a look to the summary: the dataset has missing values, there are some categorical columns codified as numeric, it has different scales for the feature values. In addition, we will recommend to take a deeper look to the data to detect more subtle issues: correlation between features, skewness in the feature values.
+
+## Distribution of pumps over Geography
+
+Let's take a look at the distribution of different type of pumps (by status) over the geography of Tanzania.
+
+We took only a sample dataset of 500 rows to display the status group of a pump. 
+
+"Functional" --> Green
+
+"Non functional" --> Red
+
+"Functional needs repair" --> Orange
+
+```{r, echo=FALSE}
+sample <-original_training_data[sample(nrow(original_training_data), 500), c("longitude", "latitude", "status_group")] 
+getColor <- function(sample) {
+  sapply(sample$status_group, function(status_group) {
+    if(as.character(status_group) == "functional") {
+      "green"
+    } else if(as.character(status_group) == "functional needs repair") {
+      "orange"
+    } else {
+      "red"
+    } })
+}
+
+icons <- awesomeIcons(
+  icon = 'icon',
+  iconColor = 'black',
+  library = 'ion',
+  markerColor = getColor(sample)
+)
+
+leaflet(data = sample) %>% addTiles() %>% setView(lng = 34.9, lat = -5.7, zoom = 5.5)%>%
+  addAwesomeMarkers(~longitude, ~latitude, icon=icons, popup =~status_group)
+```
+
+## Status of Pumps
+
+Let's check the propertion of different types of pumps (by status).
+
+```{r, echo=FALSE}
+getPalette = colorRampPalette(brewer.pal(8, "Spectral"))
+colourCount1 <- 4
+dataset_status <- original_training_data %>% 
+  group_by(original_training_data$status_group) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(per=`n`/sum(`n`)) 
+dataset_status$label <- scales::percent(dataset_status$per)
+
+ggplot(data=dataset_status)+
+  geom_bar(aes(x="", y=per, fill= dataset_status$`original_training_data$status_group`), stat="identity", width = 1)+
+  coord_polar("y", start=0)+
+  theme_void()+
+  geom_text(aes(x=1, y = sum(per) - cumsum(per) + per / 2, label=label))+
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3","dodgerblue3"))+ 
+  xlab("")+ ylab("")+
+  theme(legend.title = element_blank(), legend.position = "right")+
+  labs(title= "Pump Status", fill = "Status") +
+  theme_minimal()
+```
+
+## Feature Correlation with target variable
+
+### Amount TSH:
+
+Let's check how Amount TSH is distributed over different pump status.
+
+```{r}
+dt <- data.table(original_training_data)
+amounttsh <- dt[,list(average_tsh=mean(amount_tsh)),by=c('status_group')]
+amounttsh_plot <- ggplot(amounttsh, aes(status_group, average_tsh), fill=status_group) +
+  geom_col(col = "brown3") + ylab("Average Amount") + xlab("Status Group") + theme_minimal() + labs(title= "Average Amount per Pump Category")
+amounttsh_plot
+```
+
+### Recorded Year:
+
+Let's check how pump status is distributed over different Years of Recorded Date.
+
+```{r}
+dt$year <- lubridate::year(ymd(original_training_data$date_recorded))
+ggplot(data = dt, aes(x = as.factor(year))) + geom_bar(aes (fill=status_group)) +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3")) + xlab("Year") + ylab("Count") + theme_minimal() +
+  scale_x_discrete(limit = c("2002","2004","2011", "2012", "2013")) + 
+  labs(title="Count of Pump Status per Year", fill = "Status Group")
+```
+
+### Recorded Month:
+
+Let's check how pump status is distributed over different Months of Recorded Date.
+
+```{r}
+dt$month <- lubridate::month(ymd(original_training_data$date_recorded))
+ggplot(data = dt, aes(x = as.factor(month))) + geom_bar(aes (fill=status_group)) +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3")) + xlab("Year") + ylab("Count") + theme_minimal() + 
+  labs(title="Count of Pump Status per Month", fill = "Status Group")
+```
+
+### GPS Height:
+
+Let's check how GPS Height is distributed over over different pump status.
+
+```{r}
+gpsheight <- dt[,list(average_gpsheight=mean(gps_height)),by=c('status_group')]
+height_plot <- ggplot(gpsheight, aes(status_group, average_gpsheight), fill=status_group) +
+  geom_col(col = "brown3") + ylab("Average Amount") + xlab("Status Group") + theme_minimal() + labs(title= "Average Height per Pump Category")
+height_plot
+```
+
+### Population:
+
+Let's check how Population is distributed over over different pump status.
+
+```{r}
+population <- dt[,list(average_pop=mean(population)),by=c('status_group')]
+
+pop_plot <- ggplot(population, aes(status_group, average_pop), fill=status_group) +
+  geom_col(col = "brown3") + 
+  ylab("Average Amount") + 
+  xlab("Status Group") + 
+  theme_minimal() + 
+  labs(title= "Average Population per Pump Category")
+
+pop_plot
+```
+
+### Public Meeting:
+
+Let's check how pump status is distributed over different Public Meeting.
+
+```{r}
+ggplot(data = original_training_data[!is.na(original_training_data$public_meeting),], 
+       aes(x = status_group)) + 
+  geom_bar(aes (fill=public_meeting)) + 
+  scale_fill_manual(values = c("brown3", "darkgreen")) + 
+  theme_minimal() +
+  labs(title= "Public Meeting", fill="Public Meeting", y="Count", x="Status Group")
+```
+
+### Permit:
+
+Let's check how pump status is distributed over different Permit.
+
+```{r}
+ggplot(data = original_training_data[!is.na(original_training_data$permit),], aes(x = status_group)) + 
+  geom_bar(aes (fill=permit)) + scale_fill_manual(values = c("brown3", "darkgreen")) + theme_minimal() +
+  labs(title= "Permit", fill="Permit Status",y="Count", x="Status Group")
+```
+
+### Construction Year:
+
+Let's check how the pump status changed over the years. From the graph, we can see that the pumps that are constructed recently are more functional. When the pump gets older, chances are more that is is non-functional.
+
+```{r, echo=FALSE}
+getPalette2 = colorRampPalette(brewer.pal(8, "RdYlGn"))
+colourCount2 <- 3
+ggplot(data = original_training_data, aes(x = construction_year)) + 
+  geom_bar(aes (fill=status_group), position = "fill") + xlim(1960,2010)+
+  xlab('')+ylab('') +
+  ggtitle('Pump Status by Year') +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3"))+
+  theme(legend.title = element_blank(), legend.position = "bottom")
+```
+
+### Extraction Type Class
+
+Let's check how pump status is distributed over different extraction type class.
+
+```{r, echo=FALSE}
+ggplot(data = original_training_data, aes(x = extraction_type_class)) + 
+  geom_bar(aes (fill=status_group)) +
+  xlab('')+ylab('') +
+  ggtitle('Pump Status by extraction_type_class') +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3"))+ theme_minimal()+theme(legend.title = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(limits=c("gravity","handpump","motorpump","other","rope pump", "submersible", "wind-powered")) + labs(fill = 'Status Group') 
+```
+
+### Management Group
+
+Let's check how pump status is distributed over different management group.
+
+```{r, echo=FALSE}
+ggplot(data = original_training_data, aes(x = management_group)) + 
+  geom_bar(aes (fill=status_group)) +
+  xlab('')+ylab('') +
+  ggtitle('Pump Status by management_group') +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3"))+ theme(legend.title = element_blank(), legend.position = "bottom") + scale_x_discrete(limits=c("user-group","commercial","parastatal", "other")) +
+  theme_minimal() + labs(fill = 'Status Group')
+```
+
+### Payment Type
+
+Let's check how pump status is distributed over different Payment Type.
+
+```{r}
+getPalette = colorRampPalette(brewer.pal(8, "RdYlGn"))
+colourCount <- 6
+
+ggplot(data = original_training_data[!is.na(original_training_data$payment_type),], aes(x = status_group)) + 
+  geom_bar(aes (fill=payment_type)) + scale_fill_manual(values = getPalette(colourCount)) + theme_minimal() +
+  labs(title= "Payment Type", fill="Payment Type",y="Count", x="Status Group") 
+```
+
+### Water Quality
+
+Let's check how is the water quality in different types of pump. We see that pumps with "Soft" water quality is far the majority group.
+
+```{r, echo=FALSE}
+levels(original_training_data$water_quality)
+ggplot(data = original_training_data, aes(x = water_quality)) + 
+  geom_bar(aes (fill=status_group)) +
+  xlab('')+ylab('') +
+  ggtitle('Pump Status by water_quality') +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3"))+ 
+  theme(legend.title = element_blank(), legend.position = "bottom") + 
+  theme_minimal() + scale_x_discrete(limits=c("soft","salty","milky","coloured","salty abandoned","flouride")) + labs(fill = 'Status Group') + theme(axis.text.x = element_text(angle = 40, hjust = 0.5, vjust = 0.5))
+```
+
+### Quantity
+
+Let's check how pump status is distributed over different Quantity.
+
+```{r}
+ggplot(data = original_training_data[!is.na(original_training_data$quantity),], aes(x = status_group)) + 
+  geom_bar(aes (fill=quantity)) + scale_fill_manual(values = c("brown3", "darkgreen","orange3", "dodgerblue3")) + theme_minimal() +
+  labs(title= "Quantity", fill="Quantity",y="Count", x="Status Group") 
+```
+
+### Source Class
+
+Let's check how pump status is distributed over different Source Class.
+
+```{r}
+ggplot(data = original_training_data[!is.na(original_training_data$source_class),], 
+       aes(x = status_group)) + 
+  geom_bar(aes (fill=source_class)) + 
+  scale_fill_manual(values = c("brown3", "darkgreen")) + 
+  theme_minimal() +
+  labs(title= "Source Class", fill="Source Class", y="Count", x="Status Group")
+```
+
+### Waterpoint Type
+
+Let's check how pump status is distributed over different Waterpoint Type.
+
+```{r, echo=FALSE}
+ggplot(data = original_training_data, aes(x = waterpoint_type)) + 
+  geom_bar(aes (fill=status_group)) +
+  xlab('')+ylab('') +
+  ggtitle('Pump Status by waterpoint_type') +
+  scale_fill_manual(values = c("darkgreen","gold1", "brown3"))+ 
+  theme(legend.title = element_blank(), legend.position = "bottom") + theme_minimal() +
+  labs(fill = 'Status Group') + theme(axis.text.x = element_text(angle = 40, hjust = 0.5, vjust = 0.5)) +
+  scale_x_discrete(limits=c("communal standpipe", "communal standpipe multiple", "hand pump","other","improved spring","cattle trough","dam"))
+```
+
+# Data Cleaning
+
+The definition of "meaningless" depends on your data and your intuition. A feature can lack any importance because you know for sure that it does not going to have any impact in the final prediction (e.g., the id of the waterpoint). In addition, there are features that could be relevant but present wrong, empty or incomplete values (this is typical when there has been a problem in the data gathering process). Such features are not going to offer any advantage for prediction.
+
+## Feature Elimination
+
+We remove meaningless features and incomplete cases.
+
+### Feature: id, recorded_by and num_private
+
+- id : Unique identification of each row
+- recorded_by : It has only one value
+- num_private : Meaningless from the business point of view
+
+```{r}
+dataset <- dataset[,-which(names(dataset) == "id")]
+dataset <- dataset[,-which(names(dataset) == "recorded_by")]
+dataset <- dataset[,-which(names(dataset) == "num_private")]
+```
+
+Hence we removed these 3 features.
+
+### Feature: waterpoint_type_group and waterpoint_type
+
+Let's analyze "waterpoint_type_group" and "waterpoint_type".
+
+```{r}
+dataset %>% group_by(waterpoint_type_group, waterpoint_type) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "waterpoint_type_group")]
+```
+
+We see that "waterpoint_type" is more discrete, so let's remove "waterpoint_type_group".
+
+### Feature: source_class, source_type and source
+
+Let's analyze "source_class", "source_type" and "source".
+
+```{r }
+dataset %>% group_by(source_class, source_type, source) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "source_type")]
+```
+
+"source_type" is a middle value for "source" and "source_class", hence we removed. "source_type".
+
+### Feature: quantity_group, quantity
+
+Let's analyze "quantity_group" and "quantity".
+
+```{r }
+dataset %>% group_by(quantity_group, quantity) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "quantity_group")]
+```
+
+"quantity_group" is similar to "quantity", hence we removed "quantity_group".
+
+### Feature: quality_group and water_quality
+
+Let's analyze "quality_group", "water_quality".
+
+```{r }
+dataset %>% group_by(quality_group, water_quality) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "quality_group")]
+```
+
+"quality_group" is less precise than "water_quality", hence we removed "quality_group".
+
+### Feature: payment_type and payment
+
+Let's analyze "payment_type" and "payment".
+
+```{r }
+dataset %>% group_by(payment_type, payment) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "payment")]
+```
+
+"payment" is similar to "payment_type", hence we removed "payment".
+
+### Feature: scheme_management and scheme_name
+
+Let's analyze "scheme_management", "scheme_name"
+
+```{r }
+dataset %>% group_by(scheme_management, scheme_name) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "scheme_name")]
+```
+
+"scheme_name" has too many categories and each has very few records, hence we removed "scheme_name".
+
+### Feature: extraction_type_class, extraction_type_group and extraction_type
+
+Let's analyze "extraction_type_class", "extraction_type_group", "extraction_type".
+
+```{r }
+dataset %>% group_by(extraction_type_class, extraction_type_group, extraction_type) %>% tally()
+dataset <- dataset[,-which(names(dataset) == "extraction_type_group")]
+```
+
+"extraction_type_group" is mid value for "extraction_type" and "extraction_type_class", hence we removed "extraction_type_group".
+
+### Feature: ward, subvillage and region_code
+
+Geographic parameters such as "ward", "subvillage" has too many categories, hence can be removed. "region_code" is redundant with "region", hence can be removed.
+
+```{r }
+dataset <- dataset[,-which(names(dataset) == "ward")]
+dataset <- dataset[,-which(names(dataset) == "subvillage")]
+dataset <- dataset[,-which(names(dataset) == "region_code")]
+```
+
+### Feature: wpt_name
+
+"wpt_name" is the name of the waterpoint and it has 45684 distinct value. We can remove it.
+
+```{r}
+dataset <- dataset[,-which(names(dataset) == "wpt_name")]
+```
+
+## Factorize features
+
+If we go back to the summary of the dataset we can identify some numerical/integer features that are actually categories: `district_code` and `dataType`. What we have to do is to convert them to the proper 'class' or 'type' using the `as.factor` command.
+
+```{r Factorize features}
+# Check the class of all features
+sapply(dataset, class)
+
+# Convert Numerical/Integer to categorical
+dataset$district_code <- factor(dataset$district_code)
+
+# Convert dataType to categorical
+dataset$dataType <- factor(dataset$dataType)
+```
+
+## Hunting NAs
+
+Our dataset is filled with missing values, therefore, before we can build any predictive model we'll clean our data by filling in all NA's or empty values with more appropriate values.
+As another option, we could just remove the entries with null values (i.e., remove rows). However, in this situation (and in many other that you will face) this is out of the question: we have to provide a prediction for each and every one of the houses (required by the competition). 
+Similarly, you could discard the features with null values (i.e., remove columns), but it would mean the removal of many features (and the information they provide).
+
+As a rule of thumb, if you are allowed to discard some of your data and you do not have many null values (or you do not have a clear idea of how to impute them) you can safely delete them. If this is not the case, you must find a way to impute them (either by applying some knowledge of the addressed domain or by using some more advanced imputation method: https://topepo.github.io/caret/pre-processing.html#imputation)
+
+Let's analyze the NAs and empty/incorrect values present in various features.
+
+```{r Analyze NAs}
+findMissingValueStatistics(dataset)
+```
+
+After careful observation, we see that
+
+1. Some numeric/integer features have 0 value and logically it means NA. 
+
+2. Some categorical features have same value in both lowercase and uppercase.
+
+These are data issues. Let's handle these discripencies before we do further analysis for NA values.
+
+```{r Correct empty values and incorrect values}
+# Before I proceed further, we want to convert the character/factor variables to lowercase in order to prevent any issue with case-sensitiveness.
+dataset <- convertToLowerCase(dataset)
+
+# Set incorrect/inappropriate values present in different columns to NA
+dataset$construction_year[dataset$construction_year == 0] <- NA
+dataset$population[dataset$population == 0] <- NA
+dataset$district_code[dataset$district_code == 0] <- NA
+dataset$longitude[dataset$longitude == 0] <- NA
+dataset$gps_height[dataset$gps_height == 0] <- NA
+dataset$installer[dataset$installer == 0] <- NA
+dataset$funder[dataset$funder == 0] <- NA
+dataset$amount_tsh[dataset$amount_tsh == 0] <- NA
+
+# Find how many columns have missing values
+findMissingValueStatistics(dataset)
+```
+
+How to clean up NAs, assign them default values, and assign features the correct type? We can write long pieces of code, use an external tool that will do most of the job for you (Dataiku?) or you can use the "Import Dataset" function in RStudio. We avoided using fancy external packages to import data, and rely on the most common ones ('pandas' in Python, or 'base' or 'readr' in R).
+
+### Impute NA manually
+
+In this step, we will use our own logic/technique to impute NA values for both numeric and categorical features.
+
+#### Categorical features
+
+In any case, what we do here, is simply go through every single **factor** feature to: extend the number of possible levels to the new default for NAs (`None` or  `unknown`for categorical features or any other default value described in the documentation). For numerical values, we can just change the NA value for a default value, the median of the other values or some other value that you can infer.
+
+Now, let's create new level for categorical featues with missing values.
+
+```{r Create level for NA}
+# Create 'unknown' level for empty categorical features
+dataset$permit <- factor(dataset$permit, levels=c(levels(dataset$permit), "unknown"))
+dataset$scheme_management <- factor(dataset$scheme_management, levels=c(levels(dataset$scheme_management), "unknown"))
+dataset$public_meeting <- factor(dataset$public_meeting, levels=c(levels(dataset$public_meeting), "unknown"))
+dataset$installer <- factor(dataset$installer, levels=c(levels(dataset$installer), "unknown"))
+dataset$funder <- factor(dataset$funder, levels=c(levels(dataset$funder), "unknown"))
+dataset$district_code <- factor(dataset$district_code, levels=c(levels(dataset$district_code), "unknown"))
+dataset$source <- factor(dataset$source, levels=c(levels(dataset$source), "unknown"))
+dataset$source_class <- factor(dataset$source_class, levels=c(levels(dataset$source_class), "unknown"))
+dataset$management_group <- factor(dataset$management_group, levels=c(levels(dataset$management_group), "unknown"))
+dataset$management <- factor(dataset$management, levels=c(levels(dataset$management), "unknown"))
+dataset$quantity <- factor(dataset$quantity, levels=c(levels(dataset$quantity), "unknown"))
+dataset$water_quality <- factor(dataset$water_quality, levels=c(levels(dataset$water_quality), "unknown"))
+dataset$payment_type <- factor(dataset$payment_type, levels=c(levels(dataset$payment_type), "unknown"))
+```
+
+Once, we have created new level, we can now impute missing values for categorical featues.
+
+```{r Impute missing values for categorical featues}
+# We assume that NA values in categorical featues mean that the values are 'unknown'.
+dataset$permit[is.na(dataset$permit)] <- "unknown";
+dataset$scheme_management[is.na(dataset$scheme_management)] <- "unknown";
+dataset$public_meeting[is.na(dataset$public_meeting)] <- "unknown";
+dataset$installer[is.na(dataset$installer)] <- "unknown";
+dataset$funder[is.na(dataset$funder)] <- "unknown";
+dataset$district_code[is.na(dataset$district_code)] <- "unknown";
+dataset$source[is.na(dataset$source)] <- "unknown";
+dataset$source_class[is.na(dataset$source_class)] <- "unknown";
+dataset$management_group[is.na(dataset$management_group)] <- "unknown";
+dataset$management[is.na(dataset$management)] <- "unknown";
+dataset$quantity[is.na(dataset$quantity)] <- "unknown";
+dataset$water_quality[is.na(dataset$water_quality)] <- "unknown";
+dataset$payment_type[is.na(dataset$payment_type)] <- "unknown";
+```
+
+#### Numerical/Integer features
+
+Now, let's impute missing values for numerical/integer features.
+
+```{r Impute missing values for numerical/integer featues}
+# For all the numerical features with missing values, let's create an additional numerical feature that captures the average/median value per region per district_code.
+dataset = dataset %>% 
+  group_by(region, district_code) %>%
+  mutate(district_amount_tsh = median(amount_tsh, na.rm = T)) %>%
+  mutate(district_population = median(population, na.rm = T)) %>%
+  mutate(district_gps_height = median(gps_height, na.rm = T)) %>%
+  mutate(district_construction_year = median(construction_year, na.rm = T)) %>%
+  mutate(district_longitude = median(longitude, na.rm = T)) %>%
+  ungroup();
+
+# For all the numerical features with missing values, let's create an additional numerical features that captures the average/median value per region per district_code.
+dataset = dataset %>% 
+  group_by(region) %>%
+  mutate(region_amount_tsh = median(amount_tsh, na.rm = T)) %>%
+  mutate(region_population = median(population, na.rm = T)) %>%
+  mutate(region_gps_height = median(gps_height, na.rm = T)) %>%
+  mutate(region_construction_year = median(construction_year, na.rm = T)) %>%
+  mutate(region_longitude = median(longitude, na.rm = T)) %>%
+  ungroup();
+
+# Impute missing values using aggregated value derieved from district and region
+dataset = dataset %>%
+  mutate(amount_tsh = 
+           ifelse(!is.na(amount_tsh), 
+                  amount_tsh,
+                  ifelse(!is.na(district_amount_tsh), 
+                         district_amount_tsh,
+                         ifelse(!is.na(region_amount_tsh), 
+                                region_amount_tsh,
+                                median(dataset$amount_tsh, na.rm = T))))) %>%
+  mutate(population = 
+           ifelse(!is.na(population), 
+                  population,
+                  ifelse(!is.na(district_population), 
+                         district_population,
+                         ifelse(!is.na(region_population), 
+                                region_population,
+                                median(dataset$population, na.rm = T))))) %>%
+  mutate(gps_height = 
+           ifelse(!is.na(gps_height), 
+                  gps_height,
+                  ifelse(!is.na(district_gps_height), 
+                         district_gps_height, 
+                         ifelse(!is.na(region_gps_height), 
+                                region_gps_height,
+                                median(dataset$gps_height, na.rm = T))))) %>%
+  mutate(construction_year = 
+           ifelse(!is.na(construction_year), 
+                  construction_year,
+                  ifelse(!is.na(district_construction_year),
+                         district_construction_year, 
+                         ifelse(!is.na(region_construction_year),
+                                region_construction_year,
+                                median(dataset$construction_year, na.rm = T))))) %>%
+  mutate(longitude = 
+           ifelse(!is.na(longitude), 
+                  longitude,
+                  ifelse(!is.na(district_longitude), 
+                         district_longitude,
+                         ifelse(!is.na(region_longitude), 
+                                region_longitude, 
+                                median(dataset$longitude, na.rm = T))))) %>%
+  ungroup();
+
+# Now we no more need the aggregated fields
+dataset <- dataset[,-which(names(dataset) == "district_amount_tsh")]
+dataset <- dataset[,-which(names(dataset) == "region_amount_tsh")]
+dataset <- dataset[,-which(names(dataset) == "district_population")]
+dataset <- dataset[,-which(names(dataset) == "region_population")]
+dataset <- dataset[,-which(names(dataset) == "district_gps_height")]
+dataset <- dataset[,-which(names(dataset) == "region_gps_height")]
+dataset <- dataset[,-which(names(dataset) == "district_construction_year")]
+dataset <- dataset[,-which(names(dataset) == "region_construction_year")]
+dataset <- dataset[,-which(names(dataset) == "district_longitude")]
+dataset <- dataset[,-which(names(dataset) == "region_longitude")]
+
+# We no more need "district_code" after null imputation.
+dataset <- dataset[,-which(names(dataset) == "district_code")]
+
+# As we are done with missing value imputation, let's check the NA statistics.
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+```
+
+### Impute NA using Machine Leanring Model
+
+To impute NA, We can either write long pieces of code (did in previous section) or try using fancy external packages to impute NA. 
+
+We tried to use the RandomForest algorithm ("missForest") to impute NA values for all the features with missing values.
+
+We observed few drawbacks of "missForest" technique. 
+
+1. It can't handle factor features that have more than 53 levels. So, we have to bin the levels with less count to "others".
+
+2. Very very time consuming.
+
+At the end, we choose which way of NA impuatation gives us better result. Is it either manual process or the automated ML process? Based on the outcome, we will comment out one section of code. 
+
+```{r NA imputation using missForest}
+if(FALSE){
+  # In this imputation method, we don't need "district_code", hence can be removed.
+  dataset <- dataset[,-which(names(dataset) == "district_code")]
+  
+  # Just take a backup of dataset
+  dataset_bkp <- dataset
+  
+  # We have "funder", "installer", "date_recorded" and "lga" that have mora than 53 categories. We will do some transformtion on there features, so that we can proceed with "missForest" null value imputation.
+  
+  # "funder" and "installer" have a few large categories (more than 500 instances), so we keep those and group their smaller categories under "other"
+  dataset = dataset %>%
+    mutate(installer = myreduce_levels(installer,500, 12)) %>%
+    mutate(funder = myreduce_levels(funder,500, 12)) %>%
+    droplevels();
+  
+  # "lga" gives us an idea about rural and urban (e.g., arusha rural and arusha urban)
+  dataset = dataset %>% mutate(lga = 
+                                 ifelse(grepl(" rural", lga), 
+                                        "rural",
+                                        ifelse(grepl(" urban", lga), 
+                                               "urban", 
+                                               "other")))
+  # Convert to factor
+  dataset$lga <- as.factor(dataset$lga)
+  
+  # Extract date fields
+  dataset$date_recorded_year <- lubridate::year(ymd(dataset$date_recorded))
+  dataset$date_recorded_month <- lubridate::month(ymd(dataset$date_recorded))
+  dataset$date_recorded_day <- lubridate::day(ymd(dataset$date_recorded))
+  
+  # Convert to factor
+  dataset$date_recorded_year <- as.factor(dataset$date_recorded_year)
+  dataset$date_recorded_month <- as.factor(dataset$date_recorded_month)
+  dataset$date_recorded_day <- as.factor(dataset$date_recorded_day)
+  
+  # Let's remove "date_recorded" as we have it's individual parts.
+  dataset <- dataset[,-which(names(dataset) == "date_recorded")]
+  
+  set.seed(100)
+  dataset <- missForest(dataset, maxiter=2, ntree=6)
+  dataset_bkp_imputed_rf <- dataset
+  dataset <- dataset$ximp
+  na.cols <- which(colSums(is.na(dataset)) > 0)
+  paste('There are', length(na.cols), 'columns with missing values in dataset')
+}
+```
+
+# Feature Creation
+
+This is the section to give free rein to your imagination and create all the features that might improve the final result. Do not worry if you add some "uninformative" feature because it will be removed by the later feature selection process.
+Do not hesitate to consult the competition kernels (please cite anything you fork).
+
+```{r Feature creation}
+# Now let's bin few categories by assigning them to the closest category
+dataset = dataset %>% mutate(
+  extraction_type = revalue(
+    extraction_type, c("cemo" = "other motorpump",
+                       "climax" = "other motorpump",
+                       "other - mkulima/shinyanga" = "other handpump",
+                       "other - play pump" = "other handpump",
+                       "walimi" = "other handpump",
+                       "other - swn 81" = "swn",
+                       "swn 80" = "swn",
+                       "india mark ii" = "india mark",
+                       "india mark iii" = "india mark")))
+
+# "lga" gives us an idea about rural and urban (e.g., arusha rural and arusha urban)
+dataset = dataset %>% mutate(lga = 
+                               ifelse(grepl(" rural", lga), 
+                                      "rural",
+                                      ifelse(grepl(" urban", lga), 
+                                             "urban", 
+                                             "other")))
+# Convert to factor
+dataset$lga <- as.factor(dataset$lga)
+
+# "funder" and "installer" have a few large categories (more than 500 instances), so we keep those and group their smaller categories under "other"
+dataset = dataset %>% 
+  mutate(funder = myreduce_levels(funder, 500, 12)) %>% 
+  mutate(installer = myreduce_levels(installer, 500, 12))
+
+# Create "operation_years" by subtracting "date_recorded" and "operation_years"
+dataset = dataset %>% 
+  mutate(date_recorded = ymd(date_recorded)) %>%
+  mutate(operation_years = lubridate::year(date_recorded) - construction_year) %>%
+  mutate(operation_years = 
+           ifelse(operation_years < 0, 
+                  0, 
+                  operation_years))
+
+# Tanzania has two rainy seasons: The short rains from late-October to late-December, a.k.a. the Mango Rains, and the long rains from March to May. So let's create "season"
+dataset = dataset %>%
+  mutate(month_recorded = lubridate::month(date_recorded)) %>%
+  mutate(season = 
+           ifelse(month_recorded <= 2, 
+                  "dry short",
+                  ifelse(month_recorded <= 5, 
+                         "wet long",
+                         ifelse(month_recorded <= 9, 
+                                "dry long", 
+                                "wet short"))))
+# Convert to factor
+dataset$month_recorded <- as.factor(dataset$month_recorded)
+dataset$season <- as.factor(dataset$season)
+
+# Remove "date_recorded" and "construction_year" after new features are created
+dataset <- dataset[,-which(names(dataset) == "date_recorded")]
+dataset <- dataset[,-which(names(dataset) == "construction_year")]
+
+# As we are done with feature creation, let's check the NA statistics.
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+```
+
+## Outliers
+
+We will now focus on numerical values. If `NAs` are the natural enemy of categorical values, the main problem with numerical values are outliers (values which largely differ from the rest). Outliers can mislead the training of our models resulting in less accurate models and ultimately worse results.
+
+In this section we seek to identify outliers to then properly deal with them. If we summarize the dataset, we can see variables which "Max." is much larger than the rest of values. These features are susceptible of containing outliers. Nevetheless, the easiest way to detect outliers is visualizing the numerical values; for instance, by `boxploting` the column values.
+
+### Remove outliers
+
+In this step, we remove rows that contain outliers from one of the numeric features. 
+
+We considered outlier.size = 5, but it is still less as we ended up removing too many rows from the training set. So, we decided not to remove outliers. 
+
+```{r outlier analysis and removal}
+# Split the dataset into train and test, so that we can remove outlier from training set
+training_data <- dataset[dataset$dataType == "train",]
+test_data <- dataset[dataset$dataType == "test",]
+
+par(mfrow=c(2,5))
+for (col in names(training_data)) {
+  if (is.numeric(training_data[[col]]) ){
+    boxplot(training_data[,col], main=names(training_data[col]), type="l", col = "red")
+  }
+}
+
+if(FALSE){
+  # Handle outliers: Amount_tsh, gps_height, population, operation_years
+  nrow(training_data) #Rows before outlier removal = 59400
+  
+  for (col in names(training_data)) {
+    if (!is.factor(training_data[[col]])){
+      print(ggplot(training_data, aes_string(y=col)) + 
+              geom_boxplot(width = 0.1, outlier.size = 5) + 
+              theme(axis.line.x = element_blank(), axis.title.x = element_blank(), 
+                    axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+                    legend.position="none"))
+      
+      to_remove <- boxplot.stats(training_data[[col]])$out
+      training_data <- training_data[!training_data[[col]] %in% to_remove, ]
+    }
+  }
+  
+  nrow(training_data) #Rows before outlier removal = 45836 deletes too many
+}
+```
+
+### Clamp outliers
+
+Based on correlation with the target variable (ploting X vs Y) we could have removed the outliers manually but as the target variable is categorical we cannot do so. Our second approach was the imputation method of **Clamping**.
+
+We clamp the outliers that are more than (mean + 5SD) to the upper boundary i.e. (mean + 5SD) and the outliers that are more than (mean - 5SD) to the lower boundary i.e. (mean - 5SD).
+
+This outlier processing also didn't give us better results. Hence we commented it out.
+
+```{r clamping}
+# clamp the to 5sd from the mean
+if(FALSE){
+  dataset = dataset %>%
+    select_if(is.numeric) %>%
+    clamp(., lower = mean(.)-5*sd(.), upper = mean(.)+5*sd(.), useValues = TRUE)
+}
+```
+
+# Skewness
+
+We now need to detect skewness in the Target value. Let's see what is the effect of skewness on a variable, and plot it using ggplot. The way of getting rid of the skewness is to use the `log` (or the `log1p`) of the values of that feature, to flatten it. To reduce right skewness, take roots or logarithms or reciprocals (x to 1/x). This is the commonest problem in practice. To reduce left skewness, take squares or cubes or higher powers.
+
+While building predictive models we often see skewness in the several numerical/integer variable. Then we generally take transformations to make it more normal. We generally do it for linear models and not for tree based models, but we will follow this process irrespectively of the model used to have a standard pipeline. This actually means that our distribution of variables are not normal, we are deliberately making it normal for prediction.
+
+For numeric feature with excessive skewness, perform log transformation.
+
+We will set up my threshold for the skewness in 0.75. We place that value in that variable to adjust its value in a single place, in case I have to perform multiple tests.
+
+```{r skewness handling}
+# Set the skewness threshld
+skewness_threshold = 0.75
+
+# Fetch the numeric/integer columns
+numeric_columns <- find_numeric_features(dataset)
+
+# skew of each variable
+skew <- sapply(numeric_columns, function(x) {e1071::skewness(dataset[[x]], na.rm = T)})
+
+# transform all variables above a threshold skewness.
+skew <- skew[abs(skew) > skewness_threshold]
+for(x in names(skew)) {
+  if(!is.na(x)){
+    dataset[[x]] <- log(dataset[[x]] + 1)
+  }
+}
+```
+
+# Scaling
+
+Let's make all the numeric features scale-less by applying standardization.
+
+```{r scaling}
+# Standardize all the numeric features using mean and standard deviation
+dataset <- standardize_feature(dataset)
+```
+
+# Final Dataset
+
+The final dataset used for modeling looks like this:
+
+```{r}
+datatable(head(dataset), options = list(scrollX = TRUE,pageLength = 5), class = 'cell-border stripe',rownames = FALSE)
+```
+
+# Train and Test Spliting
+
+To facilitate the data cleaning and feature engineering we merged train and test datasets. We now split them again to create our final model.
+
+```{r Train test validation split}
+# Split the dataset into TRAIN and TEST
+training_data <- as.data.frame(dataset[dataset$dataType == "train",])
+test_data <- as.data.frame(dataset[dataset$dataType == "test",])
+
+# need to drop "TBD" from the target variable as TBD should be predicted for TEST dataset
+training_data$status_group <- droplevels(training_data$status_group)
+
+# Remove the "dataType" column from TRAIN, VALIDATION and TEST dataset
+training_data <- training_data[,-which(names(dataset) == "dataType")]
+test_data <- test_data[,-which(names(dataset) == "dataType")]
+```
+
+We also split the annotated dataset in training and validation for the later evaluation of our models.
+
+# Machine Learning Models
+
+## Model Creation
+
+In this sectiomn we will explore different types of models.
+
+Before starting model building, let's set the model training control parameters.
+
+```{r train control}
+train_control<- trainControl(method="cv", number=5,  search="grid", savePredictions = TRUE, verboseIter = FALSE)
+```
+
+### XG BOOST
+
+Let's build a XG Boost model using differnet grid parameters and training control parameters, mentioned previously.
+
+```{r XG BOOST}
+tuneGridXGB <- expand.grid(
+  nrounds=c(150),
+  max_depth = c(10,15,25,35),
+  eta = 0.05,
+  gamma = c(0.1, 1),
+  colsample_bytree = c(0.5,0.75),
+  subsample = c(0.50, 0.75),
+  min_child_weight = c(2,5))
+
+# train the xgboost learner
+cv_xgboost <- caret::train(as.factor(status_group)~., data=data.matrix(training_data),
+                           method = 'xgbTree',
+                           metric = 'Accuracy',
+                           trControl = train_control,
+                           tuneGrid = tuneGridXGB)
+
+# Best tunning parameters obtained
+cv_xgboost$bestTune
+
+# Let's check the variable importance
+plot(cv_xgboost, main = "XGBoost Summary")
+
+# Top 20 important variable
+plot(varImp(cv_xgboost), main = "Variance Importance XGBoost", top = 20)
+```
+
+### Random Forest
+
+Let's build a Random Forest model using differnet grid parameters and training control parameters, mentioned previously.
+
+```{r Random Forest}
+cv_rf<- caret::train(as.factor(status_group)~., data=data.matrix(training_data),
+                     trControl=train_control,
+                     method="rf",
+                     metric="Accuracy",
+                     tuneGrid= expand.grid(.mtry=c(2,4,8,12)),
+                     verbose=FALSE)
+
+# Best tunning parameters obtained
+cv_rf$bestTune
+
+# Get the confusion matrix on CV data
+cv_rf$finalModel$confusion
+
+# Random Forest (No. Of Trees Vs Error)
+plot(cv_rf$finalModel, main = "Random Forest (No. Of Trees Vs Error)")
+
+# Random Forest (No. Of Predictors Vs Accuracy
+plot(cv_rf, main = "Random Forest (No. Of Predictors Vs Accuracy)")
+
+# Top 20 important variable
+plot(varImp(cv_rf), main = "Variance Importance RandomForest", top = 20)
+```
+
+### KNN
+
+Let's build a KNN model using differnet grid parameters and training control parameters, mentioned previously.
+
+```{r KNN}
+cv_knn <- caret::train(as.factor(status_group)~., data=data.matrix(training_data),
+                       method = "knn",
+                       trControl = train_control,
+                       preProcess = c("center","scale"),
+                       tuneLength = 20,
+                       tuneGrid= expand.grid(.k=c(2,5,10,25)))
+
+# Best tunning parameters
+cv_knn$bestTune
+
+# K vs Accuracy
+plot(cv_knn, main = "KNN (K Vs Accuracy)")
+```
+
+## Model Prediction
+
+In this section, we will predict the Target variable of the TEST dataset using previously created ML models such as
+
+1. XG Boost
+
+2. Random Forest
+
+3. KNN
+
+```{r Predict}
+# Predict the Target variable for the TEST data using XG Boost
+final_pred_xgboost <- predict(cv_xgboost, data.matrix(test_data))
+
+# Predict the Target variable for the TEST data using Random Forest
+final_pred_rf <- predict(cv_rf, data.matrix(test_data))
+
+# Predict the Target variable for the TEST data using KNN
+final_pred_knn <- predict(cv_knn, data.matrix(test_data))
+```
+
+## Model Stacking
+
+In order to get a higher accuracy, we decided to stack the different models and take the voting (Majority Voting) into consideration while predicting.
+
+We came up with a new Dataframe that consists of the different predictions and trained a new Random Forest model on it:
+
+```{r model stacking}
+final_pred_stacked <- data.frame(final_pred_rf, final_pred_knn, final_pred_xgboost)
+
+i = 1
+while (i <= nrow(final_pred_stacked)){
+  z <- chooseBestModel(final_pred_stacked[i, 1],
+                       final_pred_stacked[i, 2], 
+                       final_pred_stacked[i,3])
+  final_pred_stacked[i, "stacked"] <- z
+  i = i +1
+}
+```
+
+# Final Submission
+
+In this section, we try to create CSV file for the submission.
+
+In comparison to all other models (Random Forest, KNN and Stacked), XGBoost performed the better. Hence we will do submission for XGBoost.
+
+```{r Final Submission}
+# Assign the output of either XGBoost, RF, KNN or Stacked for submission
+final_pred_sub <- final_pred_xgboost
+
+# Create the Dataframe with Submission file format
+submission <- data.frame(id = original_test_data$id, 
+                         status_group= (final_pred_sub))
+
+# Assign the strings to the according integer 
+submission$status_group <- as.integer(submission$status_group)
+submission$status_group[submission$status_group == 1] <- "functional"
+submission$status_group[submission$status_group == 2] <- "functional needs repair"
+submission$status_group[submission$status_group== 3] <- "non functional"
+colnames(submission) <-c("id", "status_group")
+write.csv(submission, file = "Tanzania_Final_Submission_8230.csv", row.names = FALSE)
+```
